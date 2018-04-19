@@ -91,17 +91,25 @@ read(0,$esp,0x3c);
 
 那么很明显存在溢出。
 用gdb调试下
+
 [[./img/start1.png]]
+
 可以看到在此时栈内就是输入的那段话。
 然后会使用write系统调用输出它。
+
 [[./img/start2.png]]
+
 接下来会调用read从标准输入里读0x3c字节到栈里。
 我们用pwn cyclic 生成60字节的数据读到栈里。
 发现原来的已经被我们的数据覆盖了。
+
 [[./img/start3.png]]
 [[./img/start4.png]]
+
 接下来就会报错。是在offset为20的地方。
+
 [[./img/start5.png]]
+
 然后发现原来那个 0x804809d 竟然是返回地址 Σ(っ °Д °;)っ。
 所以我就想能不把eip劫持到栈上去执行我们的shellcode。。但是checksec看一下，是开了NX的。。
 但是汇编写的还是静态编译。ret2libc不行rop链也找不到。。
@@ -116,7 +124,7 @@ read(0,$esp,0x3c);
 #+BEGIN_SRC python
 
 from  pwn import *
-context.binary='./start'
+#context.binary='./start'
 shellcode = asm(
     '''
 xor ecx,ecx
